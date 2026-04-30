@@ -27,6 +27,9 @@ int firmwareLoader(string portPath, string pathToFile) {
         return -1;
     }
 
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+
     struct termios tty;
     tcgetattr(fd, &tty);
 
@@ -49,16 +52,85 @@ int firmwareLoader(string portPath, string pathToFile) {
 
     tcsetattr(fd, TCSANOW, &tty);
 
+    // ADD HERE:
+    ioctl(fd, TIOCMBIS, TIOCM_DTR); // DTR on
+    usleep(250000);
+    ioctl(fd, TIOCMBIC, TIOCM_DTR); // DTR off
+    usleep(50000);
+
     // send bytes
     uint8_t cmd[] = {0x30, 0x20};
-    write(fd, cmd, sizeof(cmd));
 
-    // receive bytes
-    uint8_t buf[2];
-    read(fd, buf, sizeof(buf));
+    // sync loop
+    std::cout << "Start sync" << std::endl;
+
+    bool synced = false;
+
+    for (int i = 0; i < 5; i++) {
+        write(fd, cmd, sizeof(cmd));
+        // receive bytes
+        uint8_t buf[2];
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n == 2 && buf[0] == 0x14 && buf[1] == 0x10) {
+            std::cout << "Synced successfully — break out of loop   " << std::endl;
+            synced = true;
+            break;
+        }
+        usleep(100000);
+    }
+
+    if (!synced) {
+        std::cerr << "Sync failed" << std::endl;
+        close(fd);
+        return -1;
+    }
+
+    tcflush(fd, TCIOFLUSH);
+
+      uint8_t params[] = {
+      0x42,        // STK_SET_DEVICE command
+      0x86,        // devicecode (atmega328p = 0x86)
+      0x00,        // revision
+      0x00,        // progtype
+      0x01,        // parmode
+      0x01,        // polling
+      0x01,        // selftimed
+      0x01,        // lockbytes
+      0x06,        // fusebytes
+      0x00,        // flashpollval1
+      0x00,        // flashpollval2
+      0x00,        // eeprompollval1
+      0x00,        // eeprompollval2
+      0x00,        // pagesizehigh
+      0x80,        // pagesizelow  (128 bytes per page)
+      0x00,        // eepromsizehigh
+      0xFF,        // eepromsizelow (256 bytes EEPROM)
+      0x00,        // flashsize4    (32KB flash = 0x00 0x00 0x7D 0x00)
+      0x00,        // flashsize3
+      0x7D,        // flashsize2
+      0x00,        // flashsize1
+      0x20         // sync byte — every STK500 command ends with this
+  };
+
+    write(fd, params, sizeof(params));
+    usleep(100000);  // wait 100ms
+    uint8_t resp[10];  // larger buffer
+    ssize_t n = read(fd, resp, sizeof(resp));
+    for (int i = 0; i < n; i++) {
+        std::cout << "resp[" << i << "] = " << (int)resp[i] << std::endl;
+    }
+
+    if (resp[0] == 0x14 && resp[1] == 0x10) {
+        std::cout << "SET_DEVICE success" << std::endl;
+    } else {
+        std::cerr << "SET_DEVICE failed" << std::endl;
+        close(fd);
+        return -1;
+    }
+
 
     std::cout << "Firmware Loaded" << std::endl;
-
+    close(fd);
     return 0;
 }
 
@@ -87,7 +159,7 @@ int main() {
 
         UsbDevice usbDevice;
         usbDevice.portPath = callout;
-        usbDevice.name = vendor + " / " + product;
+        usbDevice.name = callout;
         devices.push_back(usbDevice);
 
         IOObjectRelease(device);
