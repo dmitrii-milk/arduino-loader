@@ -87,37 +87,37 @@ int firmwareLoader(string portPath, string pathToFile) {
 
     tcflush(fd, TCIOFLUSH);
 
-      uint8_t params[] = {
-      0x42,        // STK_SET_DEVICE command
-      0x86,        // devicecode (atmega328p = 0x86)
-      0x00,        // revision
-      0x00,        // progtype
-      0x01,        // parmode
-      0x01,        // polling
-      0x01,        // selftimed
-      0x01,        // lockbytes
-      0x06,        // fusebytes
-      0x00,        // flashpollval1
-      0x00,        // flashpollval2
-      0x00,        // eeprompollval1
-      0x00,        // eeprompollval2
-      0x00,        // pagesizehigh
-      0x80,        // pagesizelow  (128 bytes per page)
-      0x00,        // eepromsizehigh
-      0xFF,        // eepromsizelow (256 bytes EEPROM)
-      0x00,        // flashsize4    (32KB flash = 0x00 0x00 0x7D 0x00)
-      0x00,        // flashsize3
-      0x7D,        // flashsize2
-      0x00,        // flashsize1
-      0x20         // sync byte — every STK500 command ends with this
-  };
+    uint8_t params[] = {
+        0x42, // STK_SET_DEVICE command
+        0x86, // devicecode (atmega328p = 0x86)
+        0x00, // revision
+        0x00, // progtype
+        0x01, // parmode
+        0x01, // polling
+        0x01, // selftimed
+        0x01, // lockbytes
+        0x06, // fusebytes
+        0x00, // flashpollval1
+        0x00, // flashpollval2
+        0x00, // eeprompollval1
+        0x00, // eeprompollval2
+        0x00, // pagesizehigh
+        0x80, // pagesizelow  (128 bytes per page)
+        0x00, // eepromsizehigh
+        0xFF, // eepromsizelow (256 bytes EEPROM)
+        0x00, // flashsize4    (32KB flash = 0x00 0x00 0x7D 0x00)
+        0x00, // flashsize3
+        0x7D, // flashsize2
+        0x00, // flashsize1
+        0x20 // sync byte — every STK500 command ends with this
+    };
 
     write(fd, params, sizeof(params));
-    usleep(100000);  // wait 100ms
-    uint8_t resp[10];  // larger buffer
+    usleep(100000); // wait 100ms
+    uint8_t resp[10]; // larger buffer
     ssize_t n = read(fd, resp, sizeof(resp));
     for (int i = 0; i < n; i++) {
-        std::cout << "resp[" << i << "] = " << (int)resp[i] << std::endl;
+        std::cout << "resp[" << i << "] = " << (int) resp[i] << std::endl;
     }
 
     if (resp[0] == 0x14 && resp[1] == 0x10) {
@@ -134,24 +134,26 @@ int firmwareLoader(string portPath, string pathToFile) {
     return 0;
 }
 
+string getString(const io_object_t dev, const CFStringRef key) {
+    const auto ref = static_cast<CFStringRef>(IORegistryEntryCreateCFProperty(dev, key, kCFAllocatorDefault, 0));
+    if (!ref)
+        return "(unknown)";
+    char buf[256];
+    CFStringGetCString(ref, buf, sizeof(buf), kCFStringEncodingUTF8);
+    CFRelease(ref);
+    return buf;
+};
+
 int main() {
     const CFMutableDictionaryRef match = IOServiceMatching("IOSerialBSDClient");
     io_iterator_t iterator;
     const kern_return_t kr = IOServiceGetMatchingServices(kIOMainPortDefault, match, &iterator);
 
-    auto getString = [](const io_object_t dev, const CFStringRef key) -> std::string {
-        const auto ref = static_cast<CFStringRef>(IORegistryEntryCreateCFProperty(dev, key, kCFAllocatorDefault, 0));
-        if (!ref)
-            return "(unknown)";
-        char buf[256];
-        CFStringGetCString(ref, buf, sizeof(buf), kCFStringEncodingUTF8);
-        CFRelease(ref);
-        return buf;
-    };
 
     vector<UsbDevice> devices;
 
     io_object_t device;
+
     while ((device = IOIteratorNext(iterator))) {
         std::string product = getString(device, CFSTR("kUSBProductString"));
         std::string vendor = getString(device, CFSTR("kUSBVendorString"));
