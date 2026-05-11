@@ -1,6 +1,8 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#include <fstream>
+#include <cstring>
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/usb/IOUSBLib.h>
@@ -19,6 +21,62 @@ using namespace std;
 #define SET_DEVICE  0x42
 #define LEAVE_PROGMODE  0x51
 
+
+struct HexRecord {
+    uint8_t  length;
+    uint16_t address;
+    uint8_t  type;
+    uint8_t  data[16];
+};
+
+uint8_t parseByte(const std::string& line, int pos) {
+    return std::stoi(line.substr(pos, 2), nullptr, 16);
+}
+
+std::vector<HexRecord> parseHex(const std::string& pathToFile) {
+    std::vector<HexRecord> records;
+
+    std::ifstream file(pathToFile);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open hex file" << std::endl;
+        return records;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] != ':') continue;
+
+        HexRecord record;
+        record.length  = parseByte(line, 1);
+        record.address = (parseByte(line, 3) << 8) | parseByte(line, 5);
+        record.type    = parseByte(line, 7);
+
+        for (int i = 0; i < record.length; i++) {
+            record.data[i] = parseByte(line, 9 + i * 2);
+        }
+
+        if (record.type == 0x01) break; // end of file record
+
+        uint8_t checksum = parseByte(line, 9 + record.length * 2);
+
+        uint8_t sum = record.length;
+        sum += (record.address >> 8) & 0xFF;
+        sum += record.address & 0xFF;
+        sum += record.type;
+        for (int i = 0; i < record.length; i++) {
+            sum += record.data[i];
+        }
+
+        if (((256 - sum) & 0xFF) != checksum) {
+            std::cerr << "Checksum mismatch at address " << record.address << std::endl;
+            return {};
+        }
+
+        records.push_back(record);
+    }
+
+    return records;
+}
 
 class UsbDevice {
 public:
@@ -112,6 +170,37 @@ bool enterProgModeCommand(int fileDescriptor) {
     }
 
     return false;
+}
+
+bool loadAddress(int fileDescriptor, uint16_t address) {
+    uint16_t wordAddr = address / 2;
+    uint8_t cmd[] = {0x55, (uint8_t)(wordAddr >> 8), (uint8_t)(wordAddr & 0xFF), CRC_EOP};
+
+    write(fileDescriptor, cmd, sizeof(cmd));
+    usleep(50000);
+
+    uint8_t resp[2];
+    ssize_t n = read(fileDescriptor, resp, sizeof(resp));
+
+    return n == 2 && resp[0] == STK_INSYNC && resp[1] == STK_OK;
+}
+
+bool progPage(int fileDescriptor, uint8_t* data, uint8_t length) {
+    uint8_t cmd[5 + length];
+    cmd[0] = 0x64;           // STK_PROG_PAGE
+    cmd[1] = 0x00;           // size high byte
+    cmd[2] = length;         // size low byte
+    cmd[3] = 0x46;           // 'F' = flash memory type
+    memcpy(&cmd[4], data, length);
+    cmd[4 + length] = CRC_EOP;
+
+    write(fileDescriptor, cmd, sizeof(cmd));
+    usleep(100000);
+
+    uint8_t resp[2];
+    ssize_t n = read(fileDescriptor, resp, sizeof(resp));
+
+    return n == 2 && resp[0] == STK_INSYNC && resp[1] == STK_OK;
 }
 
 bool leaveProgModeCommand(int fileDescriptor) {
@@ -210,6 +299,56 @@ int firmwareLoader(string portPath, string pathToFile) {
         close(fileDescriptor);
         return -1;
     }
+
+    std::vector<HexRecord> records = parseHex(pathToFile);
+    if (records.empty()) {
+        std::cerr << "Failed to parse hex file" << std::endl;
+        close(fileDescriptor);
+        return -1;
+    }
+    std::cout << "Parsed " << records.size() << " records" << std::endl;
+
+    const int PAGE_SIZE = 128;
+    uint8_t pageBuf[PAGE_SIZE];
+    memset(pageBuf, 0xFF, PAGE_SIZE);
+
+    uint16_t currentPageAddr = records[0].address & ~(PAGE_SIZE - 1);
+
+    for (auto& record : records) {
+        uint16_t pageAddr = record.address & ~(PAGE_SIZE - 1);
+
+        if (pageAddr != currentPageAddr) {
+            if (!loadAddress(fileDescriptor, currentPageAddr)) {
+                std::cerr << "LOAD_ADDRESS failed at " << currentPageAddr << std::endl;
+                close(fileDescriptor);
+                return -1;
+            }
+            if (!progPage(fileDescriptor, pageBuf, PAGE_SIZE)) {
+                std::cerr << "PROG_PAGE failed at " << currentPageAddr << std::endl;
+                close(fileDescriptor);
+                return -1;
+            }
+            memset(pageBuf, 0xFF, PAGE_SIZE);
+            currentPageAddr = pageAddr;
+        }
+
+        int offset = record.address - currentPageAddr;
+        memcpy(pageBuf + offset, record.data, record.length);
+    }
+
+    // flush last page
+    if (!loadAddress(fileDescriptor, currentPageAddr)) {
+        std::cerr << "LOAD_ADDRESS failed at " << currentPageAddr << std::endl;
+        close(fileDescriptor);
+        return -1;
+    }
+    if (!progPage(fileDescriptor, pageBuf, PAGE_SIZE)) {
+        std::cerr << "PROG_PAGE failed at " << currentPageAddr << std::endl;
+        close(fileDescriptor);
+        return -1;
+    }
+
+    std::cout << "Flash written" << std::endl;
 
     bool leaveProgModeCommandSuccessful = leaveProgModeCommand(fileDescriptor);
 
